@@ -1,0 +1,388 @@
+---
+title: "A IRT Example in Stan"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+library(tidyverse)
+library(rstan)
+library(loo)
+
+library(here)
+library(fs)
+
+library(colorblindr)
+
+logit <- function(x) {
+  log(x / (1 - x))
+}
+inv_logit <- function(x) {
+  1 / (1 + exp(-x))
+}
+logit <- Vectorize(logit)
+inv_logit <- Vectorize(inv_logit)
+```
+
+```{r simulate-data, include = FALSE}
+set.seed(20191104)
+num_resp <- 500
+num_item <- 20
+
+items <- tibble(item_id = seq_len(num_item),
+                a = rlnorm(num_item, meanlog = 0, sdlog = 1),
+                b = rnorm(num_item, mean = 0, sd = 1))
+
+resps <- tibble(resp_id = seq_len(num_resp),
+                theta = rnorm(num_resp, 0, 1))
+
+response_data <- expand_grid(resp_id = seq_len(num_resp),
+                             item_id = seq_len(num_item)) %>%
+  left_join(resps, by = "resp_id") %>%
+  left_join(items, by = "item_id") %>%
+  mutate(prob = inv_logit(a * (theta - b)),
+         rand = runif(n(), min = 0, max = 1),
+         score = case_when(rand <= prob ~ 1L, TRUE ~ 0L)) %>%
+  select(resp_id, item_id, score)
+
+write_csv(response_data, here("data", "response-data.csv"))
+```
+
+## The Two-Parameter Logistic Item Response Model
+
+The two-parameter logistic (2-PL) item response is defined such that the probability of respondent $j$ responding correctly to item $i$ is a function the respondent's ability, $\theta_j$, and three parameters. The item difficulty, $b_i$, represents the inflection point of the logistic curve; and the item discrimination, $a_i$, represents the slope.
+
+```{r logistic-curve, echo = FALSE}
+annotate_eq <- function(label, ...) {
+  annotate("text", x = -3, y = 0.875, label = label, parse = TRUE,
+           hjust = 0, size = 4, ...)
+}
+
+a <- 1.5
+b <- 1.0
+c <- 0.0
+
+slope <- (a / 4) * (1 - c)
+midpoint <- c + (1 - c) * 0.5
+x_step <- 0.3
+y1 <- midpoint + slope * -x_step
+y2 <- midpoint + slope * x_step
+
+p <- tibble(x = seq(-3, 3, by = 0.01)) %>%
+  mutate(prob = c + (1 - c) * inv_logit(a * (x - b))) %>%
+  ggplot(aes(x = x, y = prob)) +
+    geom_line() +
+    annotate("segment", color = palette_OkabeIto[1], linetype = "dashed",
+             x = b, xend = b, y = 0, yend = midpoint) +
+    annotate("text", color = palette_OkabeIto[1],
+             label = expression("Inflection point,"~italic(b[i])), parse = TRUE,
+             x = b + 0.05, y = 0.02, hjust = 0)
+
+if (c > 0) {
+  p <- p +
+    annotate("segment", color = palette_OkabeIto[2], linetype = "dashed",
+             x = -1, xend = -Inf, y = c, yend = c) +
+    annotate("text", color = palette_OkabeIto[2],
+             label = expression("Lower asymptote,"~italic(c[i])), parse = TRUE,
+             x = -1.05, y = c - 0.02, hjust = 1, vjust = 1) +
+    annotate_eq(
+      label = expression(paste(
+        Pr(italic(y[i][j]) == 1~"|"~italic(theta[j])) == symbol(''),
+        phantom(italic(c[i]))~~symbol('+')~~"(1"~~symbol('-')~~phantom(italic(c[i]))*")"~~symbol(''),
+        frac(
+          1,
+          "1 + exp("*symbol('-')*phantom(italic(a[i]))*"("*italic(theta[j])~~symbol('-')~~phantom(italic(b[i]))*"))"
+        )
+      ))
+    ) +
+    annotate_eq(
+      label = expression(paste(
+        phantom(Pr(italic(y[i][j]) == 1~"|"~italic(theta[j])) == symbol('')),
+        phantom(italic(c[i])~~symbol('+')~~"(1"~~symbol('-')~~italic(c[i])*")"~~symbol('')) ~ atop(
+          phantom(1),
+          phantom("1+ exp("*symbol('-')*italic(a[i])*"("*italic(theta[j])~~symbol('-'))~~italic(b[i])*phantom("))")
+        )
+      )),
+      color = palette_OkabeIto[1]
+    ) +
+    annotate_eq(
+      label = expression(paste(
+        phantom(Pr(italic(y[i][j]) == 1~"|"~italic(theta[j])) == symbol('')),
+        phantom(italic(c[i])~~symbol('+')~~"(1"~~symbol('-')~~italic(c[i])*")"~~symbol('')) ~ atop(
+          phantom(1),
+          phantom("1+ exp("*symbol('-'))*italic(a[i])*phantom("("*italic(theta[j])~~symbol('-')~~italic(b[i])*"))")
+        )
+      )),
+      color = palette_OkabeIto[3]
+    ) +
+    annotate_eq(
+      label = expression(paste(
+        phantom(Pr(italic(y[i][j]) == 1~"|"~italic(theta[j])) == symbol('')),
+        italic(c[i])~~phantom(symbol('+')~~"(1"~~symbol('-'))~~italic(c[i])*phantom(")")~~symbol('') ~ atop(
+          phantom(1),
+          phantom("1+ exp("*symbol('-')*italic(a[i])*"("*italic(theta[j])~~symbol('-')~~italic(b[i])*"))")
+        )
+      )),
+      color = palette_OkabeIto[2]
+    )
+} else {
+  p <- p +
+    annotate_eq(
+      label = expression(paste(
+        Pr(italic(y[i][j]) == 1~"|"~italic(theta[j])) == symbol(''),
+        frac(
+          1,
+          "1 + exp("*symbol('-')*phantom(italic(a[i]))*"("*italic(theta[j])~~symbol('-')~~phantom(italic(b[i]))*"))"
+        )
+      ))
+    ) +
+    annotate_eq(
+      label = expression(paste(
+        phantom(Pr(italic(y[i][j]) == 1~"|"~italic(theta[j])) == symbol('')) ~ atop(
+          phantom(1),
+          phantom("1+ exp("*symbol('-')*italic(a[i])*"("*italic(theta[j])~~symbol('-'))~~italic(b[i])*phantom("))")
+        )
+      )),
+      color = palette_OkabeIto[1]
+    ) +
+    annotate_eq(
+      label = expression(paste(
+        phantom(Pr(italic(y[i][j]) == 1~"|"~italic(theta[j])) == symbol('')) ~ atop(
+          phantom(1),
+          phantom("1+ exp("*symbol('-'))*italic(a[i])*phantom("("*italic(theta[j])~~symbol('-')~~italic(b[i])*"))")
+        )
+      )),
+      color = palette_OkabeIto[3]
+    )
+}
+
+p +
+  annotate("segment", color = palette_OkabeIto[3], linetype = "solid",
+           x = b - x_step, xend = b + x_step, y = y1, yend = y2, size = 1.2,
+           arrow = arrow(ends = "both", length = unit(.1, "in"))) +
+  annotate("text", color = palette_OkabeIto[3],
+           label = expression("Slope,"~italic(a[i])), parse = TRUE,
+           x = b - 0.1, y = midpoint, hjust = 1, vjust = 0) +
+  expand_limits(x = c(-3, 3), y = c(0, 1)) +
+  scale_x_continuous(breaks = seq(-3, 3, 1)) +
+  labs(y = expression("Pr"~(italic(y[i][j])~"="~1~"|"~italic(theta[j]))),
+       x = expression(italic(theta[j]))) +
+  theme_bw()
+```
+
+
+## Stan Code for 2-PL IRT Model
+
+```{stan irt-2pl, output.var = "pl2", eval = FALSE}
+data {
+  int<lower=1> I;                            // number of items
+  int<lower=1> J;                            // number of respondents
+  int<lower=1> N;                            // number of observations
+  int<lower=1, upper=I> ii[N];               // item of observation n
+  int<lower=1, upper=J> jj[N];               // respondent of  observation n
+  int<lower=0, upper=1> y[N];                // score of observation n
+}
+parameters {
+  vector[I] b;
+  vector<lower=0>[I] a;
+
+  vector[J] theta;
+}
+model {
+  // priors
+  b ~ normal(0, 10);
+  a ~ lognormal(0, 1);
+  theta ~ normal(0, 1);
+  
+  y ~ bernoulli_logit(a[ii]  * (theta[jj] - b[ii]));
+}
+generated quantities {
+  vector[N] log_lik;
+  for (n in 1:N) {
+    log_lik[n] = bernoulli_logit_lpmf(y[n] | a[ii[n]] * (theta[jj[n]] - b[ii[n]]));
+  }
+}
+```
+
+
+## Data
+
+```{r read-data}
+library(tidyverse)
+library(here)
+
+response_data <- read_csv(here("data", "response-data.csv"),
+                          col_types = cols(resp_id = col_integer(),
+                                           item_id = col_integer(),
+                                           score = col_integer()))
+response_data
+
+num_resp <- n_distinct(response_data$resp_id)
+num_item <- n_distinct(response_data$item_id)
+
+stan_data <- list(
+  I = num_item,
+  J = num_resp,
+  N = nrow(response_data),
+  ii = response_data$item_id,
+  jj = response_data$resp_id,
+  y = response_data$score
+)
+```
+
+```{r fit-2pl, include = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+if (file_exists(here("data", "est-2pl.rds"))) {
+  irt_2pl <- read_rds(here("data", "est-2pl.rds"))
+} else {
+  irt_2pl <- stan(here("stan", "irt-2pl.stan"), data = stan_data, seed = 9416,
+                  chains = 4, iter = 2000, warmup = 1000, cores = 4,
+                  control = list(adapt_delta = 0.85, max_treedepth = 10))
+  write_rds(irt_2pl, here("data", "est-2pl.rds"), compress = "gz")
+}
+```
+
+```{r fit-2pl-display, eval = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+irt_2pl <- stan(here("stan", "irt-2pl.stan"), data = stan_data, seed = 9416,
+                chains = 4, iter = 2000, warmup = 1000, cores = 4,
+                control = list(adapt_delta = 0.99, max_treedepth = 15))
+```
+
+```{r}
+estimates <- summary(irt_2pl)$summary %>%
+  as_tibble(rownames = "parameter")
+estimates
+```
+
+### Convergence
+
+```{r}
+sims <- as.array(irt_2pl)
+apply(sims, MARGIN = 3, FUN = Rhat) %>%
+  enframe(name = "parameter", value = "Rhat") %>%
+  mutate(parameter = str_replace_all(parameter, "\\[.*\\]", "")) %>%
+  filter(parameter %in% c("a", "b", "theta", "lp__")) %>%
+  mutate(parameter = factor(parameter, levels = c("b", "a", "theta", "lp__"),
+                            labels = c("italic(b[i])", "italic(a[i])",
+                                       "italic(theta[j])", "lp__"))) %>%
+  ggplot(aes(x = parameter, y = Rhat, color = parameter)) +
+    geom_jitter(size = 3, height = 0, width = 0.2, show.legend = FALSE) +
+    geom_hline(yintercept = 1.1, linetype = "dashed") +
+    scale_x_discrete(labels = label_parsed) +
+    labs(x = NULL, y = expression(italic(widehat(R)))) +
+    scale_color_OkabeIto() +
+    theme_bw()
+```
+
+### Efficiency
+
+```{r}
+bulk_ess <- apply(sims, MARGIN = 3, FUN = ess_bulk)
+tail_ess <- apply(sims, MARGIN = 3, FUN = ess_tail)
+
+ess <- list(
+  summary(irt_2pl)$summary %>%
+    as_tibble(rownames = "parameter") %>%
+    select(parameter, n_eff),
+  enframe(apply(sims, MARGIN = 3, FUN = ess_bulk), "parameter", "bulk_ess"),
+  enframe(apply(sims, MARGIN = 3, FUN = ess_tail), "parameter", "tail_ess")
+)
+
+reduce(ess, full_join, by = "parameter") %>%
+  mutate(parameter = str_replace_all(parameter, "\\[.*\\]", "")) %>%
+  filter(parameter %in% c("b", "a", "theta", "lp__")) %>%
+  mutate(parameter = factor(parameter, levels = c("b", "a", "theta", "lp__"),
+                            labels = c("italic(b[i])", "italic(a[i])",
+                                       "italic(theta[j])", "lp__"))) %>%
+  gather(key = "measure", value = "value", -parameter) %>%
+  mutate(measure = case_when(measure == "n_eff" ~ "ESS",
+                             measure == "bulk_ess" ~ "Bulk ESS",
+                             measure == "tail_ess" ~ "Tail ESS")) %>%
+  filter(measure != "ESS") %>%
+  ggplot(aes(x = parameter, y = value, color = parameter)) +
+    facet_wrap(~ measure, nrow = 1) +
+    geom_jitter(size = 3, height = 0, width = 0.2, show.legend = FALSE) +
+    geom_hline(yintercept = 400, linetype = "dashed") +
+    expand_limits(y = c(0, 4000)) +
+    scale_x_discrete(labels = label_parsed) +
+    scale_y_continuous(labels = scales::comma_format()) +
+    scale_color_OkabeIto() +
+    labs(x = NULL, y = "Effective Sample Size") +
+    theme_bw()
+```
+
+```{r}
+sampler_params <- get_sampler_params(irt_2pl, inc_warmup = FALSE)
+upars <- suppressMessages(stan(here("stan", "irt-2pl.stan"),
+                               data = stan_data, chains = 0)) %>%
+  get_num_upars()
+E <- as.matrix(sapply(sampler_params, FUN = function(x) x[, "energy__"]))
+EBFMI <- upars / apply(E, 2, var)
+mean_accept <- sapply(sampler_params, function(x) mean(x[, "accept_stat__"]))
+max_treedepth <- sapply(sampler_params, function(x) max(x[, "treedepth__"]))
+
+tibble(chain = 1:4,
+       bfmi = EBFMI,
+       mean_accept = mean_accept,
+       max_treedepth = as.integer(max_treedepth))
+```
+
+
+### Parameter Recovery
+
+```{r model-recovery, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+item_recover <- estimates %>%
+  filter(str_detect(parameter, "^b") | str_detect(parameter, "^a")) %>%
+  select(parameter, est = mean) %>%
+  separate(parameter, into = c("parameter", "item_id", NA), convert = TRUE) %>%
+  left_join(pivot_longer(items, cols = -item_id, names_to = "parameter",
+                         values_to = "true"),
+            by = c("item_id", "parameter")) %>%
+  rename(id = item_id)
+
+resp_recover <- estimates %>%
+  filter(str_detect(parameter, "^theta")) %>%
+  select(parameter, est = mean) %>%
+  separate(parameter, into = c("parameter", "id", NA), convert = TRUE) %>%
+  left_join(rename(resps, true = theta), by = c("id" = "resp_id"))
+
+all_recover <- bind_rows(item_recover, resp_recover) %>%
+  mutate(parameter = factor(parameter, levels = c("b", "a", "theta"),
+                            labels = c("italic(b[i])", "italic(a[i])", "italic(theta[j])")))
+
+blanks <- all_recover %>%
+  group_by(parameter) %>%
+  summarize_if(is.double, list(min = min, max = max)) %>%
+  group_by(parameter) %>%
+  mutate(min = min(est_min, true_min),
+         max = max(est_max, true_max)) %>%
+  ungroup() %>%
+  select(parameter, min, max) %>%
+  pivot_longer(cols = -parameter, names_to = "bound", values_to = "value") %>%
+  group_by(parameter, bound) %>%
+  sample_n(2, replace = TRUE) %>%
+  mutate(var = c("true", "est")) %>%
+  ungroup() %>%
+  select(-bound) %>%
+  pivot_wider(names_from = var, values_from = value) %>%
+  unnest(cols = c(true, est))
+
+ggplot(all_recover, aes(x = true, y = est)) +
+  facet_wrap(~parameter, ncol = 2, scales = "free", labeller = label_parsed) +
+  geom_blank(data = blanks) +
+  geom_abline(aes(intercept = 0, slope = 1), linetype = "dashed") +
+  geom_point(alpha = 0.6, size = 1, color = palette_OkabeIto[2]) +
+  labs(x = "True Parameter Value", y = "Estimated Parameter Value") +
+  theme_bw()
+```
+
+
+## Model Comparisons
+
+```{r}
+log_lik_2pl <- extract_log_lik(irt_2pl)
+
+loo(log_lik_2pl)
+waic(log_lik_2pl)
+```
+
