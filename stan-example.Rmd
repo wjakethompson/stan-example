@@ -1,6 +1,8 @@
 ---
 title: "A IRT Example in Stan"
-output: html_notebook
+output:
+  html_notebook:
+    code_folding: hide
 editor_options: 
   chunk_output_type: console
 ---
@@ -51,7 +53,7 @@ write_csv(response_data, here("data", "response-data.csv"))
 
 ## The Two-Parameter Logistic Item Response Model
 
-The two-parameter logistic (2-PL) item response is defined such that the probability of respondent $j$ responding correctly to item $i$ is a function the respondent's ability, $\theta_j$, and three parameters. The item difficulty, $b_i$, represents the inflection point of the logistic curve; and the item discrimination, $a_i$, represents the slope.
+The two-parameter logistic (2-PL) item response theory (IRT) model is defined such that the probability of respondent $j$ responding correctly to item $i$ is a function the respondent's ability, $\theta_j$, and three parameters. The item difficulty, $b_i$, represents the inflection point of the logistic curve; and the item discrimination, $a_i$, represents the slope.
 
 ```{r logistic-curve, echo = FALSE}
 annotate_eq <- function(label, ...) {
@@ -174,6 +176,8 @@ p +
 
 ## Stan Code for 2-PL IRT Model
 
+The Stan code for the 2-PL IRT model is below (also can be found in `stan/irt-2pl.stan`). There are four blocks of code. The `data` blocks defines the data that is sent from R to Stan. The `parameters` block defines the parameters (with any required constraints) that are to be estimated. The `model` block defines the prior distributions and the likelihood function. Finally, the `generated quantities` is used to generate new values, based on the estimated parameters.
+
 ```{stan irt-2pl, output.var = "pl2", eval = FALSE}
 data {
   int<lower=1> I;                            // number of items
@@ -208,6 +212,8 @@ generated quantities {
 
 ## Data
 
+To estimate the model, we first read in the data, and put the necessary variables into a list. Note that the names of each list element correspond to the variable names in the `data` block of the Stan code.
+
 ```{r read-data}
 library(tidyverse)
 library(here)
@@ -231,6 +237,8 @@ stan_data <- list(
 )
 ```
 
+We then estimate the model using the `stan()` function. We specify the location of the Stan script, the data list we created, and other characteristics of the estimation process (e.g., number of chains, iterations, etc.).
+
 ```{r fit-2pl, include = FALSE, message = FALSE, warning = FALSE, error = FALSE}
 if (file_exists(here("data", "est-2pl.rds"))) {
   irt_2pl <- read_rds(here("data", "est-2pl.rds"))
@@ -248,6 +256,8 @@ irt_2pl <- stan(here("stan", "irt-2pl.stan"), data = stan_data, seed = 9416,
                 control = list(adapt_delta = 0.99, max_treedepth = 15))
 ```
 
+After estimating the model, we can view the parameter estimates, and summaries of the posterior distributions.
+
 ```{r}
 estimates <- summary(irt_2pl)$summary %>%
   as_tibble(rownames = "parameter")
@@ -255,6 +265,8 @@ estimates
 ```
 
 ### Convergence
+
+Convergence is measures by the $\hat{R}$ statistic.
 
 ```{r}
 sims <- as.array(irt_2pl)
@@ -275,6 +287,8 @@ apply(sims, MARGIN = 3, FUN = Rhat) %>%
 ```
 
 ### Efficiency
+
+To evaluate the efficiency of the estimation, we can first examine the effective samples sizes. In addition the overall effective sample sizes, we can also look at more specific "bulk" and "tail" effective sample sizes. This can provide more diagnostic information about where we might see problems with our inferences.
 
 ```{r}
 bulk_ess <- apply(sims, MARGIN = 3, FUN = ess_bulk)
@@ -311,6 +325,8 @@ reduce(ess, full_join, by = "parameter") %>%
     theme_bw()
 ```
 
+We can also examine the Bayesian factor of missing information, the mean acceptance rate, and the maximum treedepth for each chain.
+
 ```{r}
 sampler_params <- get_sampler_params(irt_2pl, inc_warmup = FALSE)
 upars <- suppressMessages(stan(here("stan", "irt-2pl.stan"),
@@ -329,6 +345,8 @@ tibble(chain = 1:4,
 
 
 ### Parameter Recovery
+
+To verify the model is defined correctly, we can look at the parameter recovery. If everything works as expected, we expect to see a strong relationship between the data-generating and estimated values.
 
 ```{r model-recovery, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
 item_recover <- estimates %>%
@@ -379,10 +397,48 @@ ggplot(all_recover, aes(x = true, y = est)) +
 
 ## Model Comparisons
 
-```{r}
+We can compare models by using leave-one-out cross validation (LOO) and the widely applicable information criterion. We can view the LOO and WAIC for the 2-PL model by using the `loo()` and `waic()` functions.
+
+```{r warning = FALSE, message = FALSE, error = FALSE}
 log_lik_2pl <- extract_log_lik(irt_2pl)
 
-loo(log_lik_2pl)
-waic(log_lik_2pl)
+loo_2pl <- loo(log_lik_2pl)
+waic_2pl <- waic(log_lik_2pl)
+
+loo_2pl
+waic_2pl
+```
+
+To compare to another model, we can estimate the 1-PL IRT model, and then compare the LOO and WAIC values.
+
+```{r fit-1pl, include = FALSE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+if (file_exists(here("data", "est-1pl.rds"))) {
+  irt_1pl <- read_rds(here("data", "est-1pl.rds"))
+} else {
+  irt_1pl <- stan(here("stan", "irt-1pl.stan"), data = stan_data, seed = 9416,
+                  chains = 4, iter = 2000, warmup = 1000, cores = 4,
+                  control = list(adapt_delta = 0.85, max_treedepth = 10))
+  write_rds(irt_1pl, here("data", "est-1pl.rds"), compress = "gz")
+}
+```
+
+```{r fit-1pl-display, eval = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+irt_1pl <- stan(here("stan", "irt-1pl.stan"), data = stan_data, seed = 9416,
+                chains = 4, iter = 2000, warmup = 1000, cores = 4,
+                control = list(adapt_delta = 0.99, max_treedepth = 15))
+```
+
+```{r results = "hide"}
+log_lik_1pl <- extract_log_lik(irt_1pl)
+
+loo_1pl <- loo(log_lik_1pl)
+waic_1pl <- waic(log_lik_1pl)
+```
+
+When looking at the comparisons, a negative value indicates a preference for the first model listed in the comparison.
+
+```{r}
+compare(loo_2pl, loo_1pl)
+compare(waic_2pl, waic_1pl)
 ```
 
