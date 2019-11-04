@@ -55,7 +55,7 @@ write_csv(response_data, here("data", "response-data.csv"))
 
 The two-parameter logistic (2-PL) item response theory (IRT) model is defined such that the probability of respondent $j$ responding correctly to item $i$ is a function the respondent's ability, $\theta_j$, and three parameters. The item difficulty, $b_i$, represents the inflection point of the logistic curve; and the item discrimination, $a_i$, represents the slope.
 
-```{r logistic-curve, echo = FALSE}
+```{r logistic-curve, echo = FALSE, warning = FALSE}
 annotate_eq <- function(label, ...) {
   annotate("text", x = -3, y = 0.875, label = label, parse = TRUE,
            hjust = 0, size = 4, ...)
@@ -253,7 +253,7 @@ if (file_exists(here("data", "est-2pl.rds"))) {
 ```{r fit-2pl-display, eval = FALSE, message = FALSE, warning = FALSE, error = FALSE}
 irt_2pl <- stan(here("stan", "irt-2pl.stan"), data = stan_data, seed = 9416,
                 chains = 4, iter = 2000, warmup = 1000, cores = 4,
-                control = list(adapt_delta = 0.99, max_treedepth = 15))
+                control = list(adapt_delta = 0.85, max_treedepth = 15))
 ```
 
 After estimating the model, we can view the parameter estimates, and summaries of the posterior distributions.
@@ -425,7 +425,7 @@ if (file_exists(here("data", "est-1pl.rds"))) {
 ```{r fit-1pl-display, eval = FALSE, message = FALSE, warning = FALSE, error = FALSE}
 irt_1pl <- stan(here("stan", "irt-1pl.stan"), data = stan_data, seed = 9416,
                 chains = 4, iter = 2000, warmup = 1000, cores = 4,
-                control = list(adapt_delta = 0.99, max_treedepth = 15))
+                control = list(adapt_delta = 0.85, max_treedepth = 15))
 ```
 
 ```{r results = "hide"}
